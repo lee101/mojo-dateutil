@@ -62,6 +62,21 @@ def test_until_is_inclusive():
     assert got[-1] == until
 
 
+def test_daily_simd_tail_and_skip_match_upstream():
+    options = {"count": 17, "interval": 3, "byhour": 7, "byminute": 5, "bysecond": 2}
+    ours = mojo.rrule(mojo.DAILY, dtstart=START, **options)
+    theirs = upstream.rrule(upstream.DAILY, dtstart=START, **options)
+    assert list(ours) == list(theirs)
+    assert ours[5:17] == theirs[5:17]
+
+
+def test_secondly_unfiltered_fast_path_matches_upstream():
+    ours = mojo.rrule(mojo.SECONDLY, dtstart=START, count=17, interval=13)
+    theirs = upstream.rrule(upstream.SECONDLY, dtstart=START, count=17, interval=13)
+    assert list(ours) == list(theirs)
+    assert ours[11] == theirs[11]
+
+
 def test_aware_recurrence_matches_upstream():
     start = datetime(2024, 1, 1, 8, 30, tzinfo=timezone(timedelta(hours=5, minutes=30)))
     options = {"count": 50, "byweekday": (mojo.MO, mojo.WE, mojo.FR)}

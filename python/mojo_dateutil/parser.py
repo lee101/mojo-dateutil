@@ -199,12 +199,15 @@ def parse_many(values: Iterable[str | bytes]) -> list[datetime]:
         index = int(failures[0])
         raise ValueError(f"invalid ISO datetime at index {index}: {encoded[index]!r}")
     result = []
-    for row in fields:
+    for row in fields.tolist():
         zone = None
         if row[8]:
-            seconds = int(row[7])
-            zone = timezone.utc if seconds == 0 else timezone(timedelta(seconds=seconds))
-        result.append(datetime(*(int(v) for v in row[:7]), tzinfo=zone))
+            seconds = row[7]
+            zone = _FIXED_OFFSETS.get(seconds)
+            if zone is None:
+                zone = timezone(timedelta(seconds=seconds))
+                _FIXED_OFFSETS[seconds] = zone
+        result.append(datetime(*row[:7], tzinfo=zone))
     return result
 
 

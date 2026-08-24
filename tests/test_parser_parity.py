@@ -83,6 +83,11 @@ def test_parse_many_matches_individual_upstream_results():
     assert parser.parse_many(values) == [upstream.isoparse(value) for value in values]
 
 
+def test_parse_many_reuses_fixed_offset_objects():
+    values = parser.parse_many(["2024-01-01T00:00:00+05:30"] * 3)
+    assert values[0].tzinfo is values[1].tzinfo is values[2].tzinfo
+
+
 @pytest.mark.parametrize("count", [4095, 4096])
 def test_parse_many_serial_and_parallel_thresholds(count):
     values = [

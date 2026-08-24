@@ -105,18 +105,22 @@ same inputs; ratios below 1 mean Mojo is slower.
 
 | case | mojo-dateutil | python-dateutil | ratio |
 | --- | ---: | ---: | ---: |
-| `isoparse` 100k ISO datetimes | 307.22 ms | 937.38 ms | 3.05x faster |
-| `parse_many` 100k ISO datetimes | 840.56 ms | 926.17 ms | 1.10x faster |
-| `SECONDLY`, 250k occurrences | 365.94 ms | 705.55 ms | 1.93x faster |
-| `DAILY`, 100k occurrences | 88.33 ms | 231.75 ms | 2.62x faster |
-| `MONTHLY` weekdays, 50k | 44.05 ms | 112.10 ms | 2.54x faster |
+| `isoparse` 100k ISO datetimes | 299.82 ms | 889.60 ms | 2.97x faster |
+| `parse_many` 100k ISO datetimes | 143.29 ms | 864.28 ms | 6.03x faster |
+| `SECONDLY`, 250k occurrences | 267.41 ms | 761.41 ms | 2.85x faster |
+| `DAILY`, 100k occurrences | 38.69 ms | 230.27 ms | 5.95x faster |
+| `MONTHLY` weekdays, 50k | 24.57 ms | 61.54 ms | 2.51x faster |
 
 The parser clears native result fields a SIMD vector at a time with a scalar
 tail. Batches of at least 4,096 records use four independent native calls over
 disjoint slices of the same NumPy allocations; smaller batches stay serial.
-Monthly weekday rules advance directly by eligible months instead of repeating
-civil-date transforms for every scanned day. Recurrences with one fixed time
-also reuse a single `timedelta` while materializing Python objects.
+Batch materialization converts native rows to Python integers in bulk and
+reuses fixed-offset timezone objects. Simple daily rules fill ordinal and time
+buffers with SIMD stores plus a scalar tail, while unfiltered secondly rules
+skip calendar filtering entirely. Monthly weekday rules advance directly by
+eligible months instead of repeating civil-date transforms for every scanned
+day. Recurrences with one fixed time also reuse a single `timedelta` while
+materializing Python objects.
 
 There is no GPU path. These kernels are short, branch-heavy parsing and
 calendar operations with low arithmetic intensity, followed by unavoidable

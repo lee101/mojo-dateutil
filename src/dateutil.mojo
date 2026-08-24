@@ -223,6 +223,15 @@ def mask_allows(mask: Int, value: Int) -> Bool:
     return mask == 0 or ((mask >> value) & 1) != 0
 
 
+def single_mask_value(mask: Int, limit: Int) -> Int:
+    if mask == 0 or (mask & (mask - 1)) != 0:
+        return -1
+    for value in range(limit):
+        if ((mask >> value) & 1) != 0:
+            return value
+    return -1
+
+
 def date_allowed(
     year: Int,
     month: Int,
@@ -409,6 +418,55 @@ def mdu_rrule_generate(
     var start_week = start_ordinal - ((start_weekday - week_start + 7) % 7)
 
     if (
+        freq == 3
+        and month_mask == 0
+        and monthday_pos == 0
+        and monthday_neg == 0
+        and weekday_mask == 0
+        and nth_n == 0
+    ):
+        var fixed_hour = single_mask_value(hour_mask, 24)
+        var fixed_minute = single_mask_value(minute_mask, 60)
+        var fixed_second = single_mask_value(second_mask, 60)
+        if fixed_hour >= 0 and fixed_minute >= 0 and fixed_second >= 0:
+            var fixed_seconds = fixed_hour * 3600 + fixed_minute * 60 + fixed_second
+            var first_index = 1 if fixed_seconds < start_seconds else 0
+            var last_ordinal = until_ordinal - (1 if fixed_seconds > until_seconds else 0)
+            if last_ordinal < start_ordinal:
+                return 0
+            var available = (last_ordinal - start_ordinal) // interval - first_index + 1
+            if available <= skip:
+                return 0
+            var output_n = min(capacity, available - skip)
+            if count_limit >= 0:
+                output_n = min(output_n, count_limit - skip)
+            if output_n <= 0:
+                return 0
+            var candidate_index = first_index + skip
+            comptime W = simd_width_of[DType.float64]()
+            var fixed_vector = SIMD[DType.int64, W](Int64(fixed_seconds))
+            while stored < min(W, output_n):
+                result_ordinals[stored] = Int64(start_ordinal + candidate_index * interval)
+                result_seconds[stored] = Int64(fixed_seconds)
+                stored += 1
+                candidate_index += 1
+            if output_n >= W:
+                var ordinals = result_ordinals.load[width=W](0)
+                var ordinal_step = SIMD[DType.int64, W](Int64(interval * W))
+                while stored + W <= output_n:
+                    ordinals += ordinal_step
+                    result_ordinals.store[width=W](stored, ordinals)
+                    result_seconds.store[width=W](stored, fixed_vector)
+                    stored += W
+                    candidate_index += W
+            while stored < output_n:
+                result_ordinals[stored] = Int64(start_ordinal + candidate_index * interval)
+                result_seconds[stored] = Int64(fixed_seconds)
+                stored += 1
+                candidate_index += 1
+            return stored
+
+    if (
         freq == 1
         and weekday_mask != 0
         and monthday_pos == 0
@@ -472,6 +530,34 @@ def mdu_rrule_generate(
                                         return stored
                     weekday = (weekday + 1) % 7
             month_offset += interval
+
+    if (
+        freq == 6
+        and month_mask == 0
+        and monthday_pos == 0
+        and monthday_neg == 0
+        and weekday_mask == 0
+        and nth_n == 0
+        and hour_mask == 0
+        and minute_mask == 0
+        and second_mask == 0
+    ):
+        var first_absolute = start_ordinal * 86400 + start_seconds
+        var last_absolute = until_ordinal * 86400 + until_seconds
+        var available = (last_absolute - first_absolute) // interval + 1
+        if available <= skip:
+            return 0
+        var output_n = min(capacity, available - skip)
+        if count_limit >= 0:
+            output_n = min(output_n, count_limit - skip)
+        var absolute = first_absolute + skip * interval
+        while stored < output_n:
+            var ordinal = absolute // 86400
+            result_ordinals[stored] = Int64(ordinal)
+            result_seconds[stored] = Int64(absolute - ordinal * 86400)
+            stored += 1
+            absolute += interval
+        return stored
 
     if freq == 6:
         var absolute = start_ordinal * 86400 + start_seconds
