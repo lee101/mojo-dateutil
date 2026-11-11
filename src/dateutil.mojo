@@ -451,7 +451,7 @@ def mdu_rrule_generate(
                 stored += 1
                 candidate_index += 1
             if output_n >= W:
-                var ordinals = result_ordinals.load[width=W](0)
+                var ordinals = result_ordinals.unsafe_load[width=W](0)
                 var ordinal_step = SIMD[DType.int64, W](Int64(interval * W))
                 while stored + W <= output_n:
                     ordinals += ordinal_step
