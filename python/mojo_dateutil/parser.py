@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 import re
 from typing import Iterable
@@ -19,10 +18,11 @@ class ParserError(ValueError):
 _ISO_FIELDS = I * 9
 _PARSE_ISO = None
 _PARSE_ISO_MANY = None
+_PARSE_ISO_MANY_SERIAL = None
 _FIXED_OFFSETS = {0: timezone.utc}
-_PARALLEL_THRESHOLD = 4096
+# Workers handed to the native kernel. It only splits a batch at or above its
+# own measured record threshold; below that the caller runs the serial body.
 _PARALLEL_WORKERS = 4
-_PARSE_POOL = None
 
 
 def isoparse(dt_str: str | bytes) -> datetime:
@@ -135,8 +135,8 @@ def parse(
     return (value, ()) if fuzzy_with_tokens else value
 
 
-def parse_many(values: Iterable[str | bytes]) -> list[datetime]:
-    """Parse ISO values in one native call."""
+def _prepare_batch(values):
+    """Encode ISO values into the contiguous buffers the native parser reads."""
     encoded = []
     for value in values:
         try:
@@ -146,54 +146,56 @@ def parse_many(values: Iterable[str | bytes]) -> list[datetime]:
         if not raw:
             raise ValueError("ISO string too short")
         encoded.append(raw)
-    if not encoded:
-        return []
+    return encoded
+
+
+def _native_entry(parallel: bool):
+    global _PARSE_ISO_MANY, _PARSE_ISO_MANY_SERIAL
+    if _PARSE_ISO_MANY is None:
+        native = lib()
+        _PARSE_ISO_MANY = native.mdu_parse_iso_many_par
+        _PARSE_ISO_MANY_SERIAL = native.mdu_parse_iso_many
+    return _PARSE_ISO_MANY if parallel else _PARSE_ISO_MANY_SERIAL
+
+
+def _prepare_buffers(encoded):
+    """Pack encoded records into the contiguous native input buffers."""
     lengths = np.fromiter((len(raw) for raw in encoded), dtype=np.int64, count=len(encoded))
     offsets = np.empty(len(encoded) + 1, dtype=np.int64)
     offsets[0] = 0
     np.cumsum(lengths, out=offsets[1:])
     data = np.frombuffer(b"".join(encoded), dtype=np.uint8)
-    fields = np.empty((len(encoded), 9), dtype=np.int64)
-    statuses = np.empty(len(encoded), dtype=np.int64)
-    global _PARSE_ISO_MANY, _PARSE_POOL
-    if _PARSE_ISO_MANY is None:
-        _PARSE_ISO_MANY = lib().mdu_parse_iso_many
-    data_addr = addr(data)
-    offsets_addr = addr(offsets)
-    fields_addr = addr(fields)
-    statuses_addr = addr(statuses)
-    if len(encoded) >= _PARALLEL_THRESHOLD:
-        if _PARSE_POOL is None:
-            _PARSE_POOL = ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS)
-        chunk_size = (len(encoded) + _PARALLEL_WORKERS - 1) // _PARALLEL_WORKERS
-        futures = []
-        for begin in range(0, len(encoded), chunk_size):
-            count = min(chunk_size, len(encoded) - begin)
-            futures.append(
-                _PARSE_POOL.submit(
-                    _PARSE_ISO_MANY,
-                    data_addr,
-                    offsets_addr + begin * offsets.itemsize,
-                    i64(len(data), "batch byte length"),
-                    i64(count, "batch count"),
-                    fields_addr + begin * fields.strides[0],
-                    statuses_addr + begin * statuses.itemsize,
-                )
-            )
-        bridge_statuses = [future.result() for future in futures]
-    else:
-        bridge_statuses = [
-            _PARSE_ISO_MANY(
-                data_addr,
-                offsets_addr,
-                i64(len(data), "batch byte length"),
-                i64(len(encoded), "batch count"),
-                fields_addr,
-                statuses_addr,
-            )
-        ]
-    if any(status != 0 for status in bridge_statuses):
-        raise RuntimeError(f"native batch parser rejected its buffers (status {bridge_statuses})")
+    return data, offsets
+
+
+def _run_native(native, parallel, data, offsets, count, fields, statuses):
+    common = (
+        addr(data),
+        addr(offsets),
+        i64(len(data), "batch byte length"),
+        i64(count, "batch count"),
+        addr(fields),
+        addr(statuses),
+    )
+    if parallel:
+        return native(*common, _PARALLEL_WORKERS)
+    return native(*common)
+
+
+def _parse_batch(encoded, parallel: bool):
+    """Run one native batch call and return the raw ``(fields, statuses)``."""
+    native = _native_entry(parallel)
+    count = len(encoded)
+    data, offsets = _prepare_buffers(encoded)
+    fields = np.empty((count, 9), dtype=np.int64)
+    statuses = np.empty(count, dtype=np.int64)
+    status = _run_native(native, parallel, data, offsets, count, fields, statuses)
+    if status != 0:
+        raise RuntimeError(f"native batch parser rejected its buffers (status {status})")
+    return fields, statuses
+
+
+def _materialize(encoded, fields, statuses) -> list[datetime]:
     failures = np.flatnonzero(statuses)
     if failures.size:
         index = int(failures[0])
@@ -209,6 +211,19 @@ def parse_many(values: Iterable[str | bytes]) -> list[datetime]:
                 _FIXED_OFFSETS[seconds] = zone
         result.append(datetime(*row[:7], tzinfo=zone))
     return result
+
+
+def parse_many(values: Iterable[str | bytes]) -> list[datetime]:
+    """Parse ISO values in one native call.
+
+    Large batches are split across ``_PARALLEL_WORKERS`` by
+    ``max.algorithm.parallelize`` inside the kernel, above its measured
+    threshold. Per-record output is identical to the serial path.
+    """
+    encoded = _prepare_batch(values)
+    if not encoded:
+        return []
+    return _materialize(encoded, *_parse_batch(encoded, parallel=True))
 
 
 class parser:

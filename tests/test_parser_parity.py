@@ -88,7 +88,7 @@ def test_parse_many_reuses_fixed_offset_objects():
     assert values[0].tzinfo is values[1].tzinfo is values[2].tzinfo
 
 
-@pytest.mark.parametrize("count", [4095, 4096])
+@pytest.mark.parametrize("count", [524_287, 524_288])
 def test_parse_many_serial_and_parallel_thresholds(count):
     values = [
         "2024-02-29T12:34:56.123456+05:30",
@@ -98,7 +98,7 @@ def test_parse_many_serial_and_parallel_thresholds(count):
 
 
 def test_parse_many_parallel_error_index():
-    values = ["2024-01-01T00:00:00Z"] * 4096
+    values = ["2024-01-01T00:00:00Z"] * 524_288
     values[3073] = "2024-02-30"
     with pytest.raises(ValueError, match="index 3073"):
         parser.parse_many(values)

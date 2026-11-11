@@ -8,8 +8,8 @@ subset, while one shared native library does the calendar work.
 
 The useful fast paths are ISO-8601 parsing and bounded recurrence expansion.
 Single-value parsing uses bytes and a small ctypes field buffer directly, while
-`parse_many()` keeps its NumPy buffers zero-copy and parallelizes sufficiently
-large batches.
+`parse_many()` keeps its NumPy buffers zero-copy and hands large batches to a
+native kernel that splits them across worker threads.
 
 ## Install
 
@@ -112,15 +112,72 @@ same inputs; ratios below 1 mean Mojo is slower.
 | `MONTHLY` weekdays, 50k | 24.57 ms | 61.54 ms | 2.51x faster |
 
 The parser clears native result fields a SIMD vector at a time with a scalar
-tail. Batches of at least 4,096 records use four independent native calls over
-disjoint slices of the same NumPy allocations; smaller batches stay serial.
-Batch materialization converts native rows to Python integers in bulk and
-reuses fixed-offset timezone objects. Simple daily rules fill ordinal and time
-buffers with SIMD stores plus a scalar tail, while unfiltered secondly rules
-skip calendar filtering entirely. Monthly weekday rules advance directly by
-eligible months instead of repeating civil-date transforms for every scanned
-day. Recurrences with one fixed time also reuse a single `timedelta` while
-materializing Python objects.
+tail. Simple daily rules fill ordinal and time buffers with SIMD stores plus a
+scalar tail, while unfiltered secondly rules skip calendar filtering entirely.
+Monthly weekday rules advance directly by eligible months instead of repeating
+civil-date transforms for every scanned day. Recurrences with one fixed time
+also reuse a single `timedelta` while materializing Python objects.
+
+### Parallel batch parsing
+
+`parse_many()` calls `mdu_parse_iso_many_par`, which uses `parallelize` from
+`max.algorithm` (the `std` forms no longer compile on this toolchain). Each
+worker owns a contiguous record range, so the output bytes are identical to the
+serial `mdu_parse_iso_many` path; `tests/test_parse_parallel.py` compares them
+on the same input at 1,024 / 524,287 / 524,288 / 1,100,000 records and at 0, 1,
+2, 3, 4 and 8 workers.
+
+The threshold is `PARSE_PARALLEL_THRESHOLD = 524288` records, measured on this
+host (Intel Xeon E5-2697 v4, shared, other benchmarks running) under the pixi
+Python 3.13.14 environment, with alternating medians so call order cannot bias
+the result. The crossover is between 131k and 197k records: below it a worker
+launch costs more than it saves. 524,288 sits above that with a wide margin, so real
+callers never pay for a launch they cannot amortize.
+
+| records | serial ms | 1 worker | 2 workers | 4 workers | 8 workers | 4 vs serial |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 262,144 | 23.38 | 23.69 | 23.84 | 25.40 | 25.20 | 0.92x (serial) |
+| 524,288 | 46.94 | 43.44 | 35.60 | 22.06 | 22.30 | 2.13x faster |
+| 1,000,000 | 84.93 | 80.23 | 62.97 | 36.57 | 37.96 | 2.32x faster |
+| 2,000,000 | 182.46 | 163.53 | 102.21 | 64.98 | 66.69 | 2.81x faster |
+| 4,000,000 | 344.48 | 341.08 | 216.94 | 116.79 | 120.04 | 2.95x faster |
+
+The 262,144 row is below the threshold, so the parallel entry deliberately runs
+the serial body; the 0.92x there is measurement noise, not a slowdown. Scaling flattens at 4
+workers: 8 workers are level with 4 (within 4% either way, i.e. noise), so the
+cap stays at 4 as required for a shared host. The crossover itself was measured
+with the gate disabled: 1.01-1.03x at 16k, 49k and 65k records, 0.72x at 98k,
+0.88x at 131k, 1.24x at 197k, 1.75x at 262k. It sits between 131k and 197k and
+moves with host load; repeated runs put it anywhere in that band.
+
+Before/after on the shipped path. Before this pass the Python wrapper split
+batches at 4,096 records across four `ThreadPoolExecutor` calls into the
+*serial* export. That is now removed; the parallelism lives in the kernel.
+End-to-end `parse_many()` (encoding, native call, `datetime` materialization) is
+a wash, because most of its time is Python-side work the kernel does not
+touch:
+
+| records | before ms | after ms |
+| --- | ---: | ---: |
+| 100,000 | 156.0 | 155.4 |
+| 524,288 | 864.0 | 900.7 |
+| 1,000,000 | 1,667.8 | 1,660.7 |
+| 2,000,000 | 3,318.3 | 3,458.7 |
+
+That is 0.96x to 1.04x, i.e. parity within this host's noise. The kernel alone
+is genuinely faster, but `parse_many()` runs at roughly 1.6-1.7 us per record
+either way, so the parallelism does not move the public end-to-end number. The
+honest summary is that replacing the old Python thread pool with the native
+`parallelize` path is a wash on the public call: it is neither the 3x the
+kernel shows on its own nor a regression.
+
+Recurrence generation is deliberately left serial, and that is a measurement,
+not an assumption. For 250,000 secondly occurrences the native generator itself
+takes about 0.8 ms; building the Python `datetime` objects from its output takes
+about 400 ms. Parallelizing the kernel would split 0.8 ms across workers while a
+launch costs about 20 us, and the materialization that dominates the call is
+untouched. `_generate()` is the native path, so splitting it would be strictly
+worse than the serial scan.
 
 There is no GPU path. These kernels are short, branch-heavy parsing and
 calendar operations with low arithmetic intensity, followed by unavoidable
@@ -131,8 +188,10 @@ added.
 ## How it works
 
 `src/dateutil.mojo` is one compilation unit containing the ISO state machine,
-Gregorian ordinal conversions, RFC recurrence filters, and three C ABI
-exports. `build/build.sh` compiles it with `mojo build --emit shared-lib`.
+Gregorian ordinal conversions, RFC recurrence filters, and four C ABI exports.
+`build/build.sh` compiles it with `mojo build --emit shared-lib`; `MD_SRC` and
+`MD_OUT` let a benchmark build a variant (for example with a different
+threshold) without touching the shipped library.
 
 The Python wrapper owns every allocation. Single parsing passes the encoded
 bytes and a nine-field ctypes array directly. Bulk text is a contiguous `uint8`

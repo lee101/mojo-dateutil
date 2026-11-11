@@ -16,6 +16,7 @@ I = ctypes.c_int64
 _SIGNATURES = {
     "mdu_parse_iso": ([ctypes.c_char_p, I, ctypes.POINTER(I)], I),
     "mdu_parse_iso_many": ([I] * 6, I),
+    "mdu_parse_iso_many_par": ([I] * 7, I),
     "mdu_rrule_generate": ([I] * 21, I),
 }
 
