@@ -589,6 +589,8 @@ def mdu_rrule_generate(
             absolute += interval
         return stored
 
+    var start_year_cached = ymd_year_from_ordinal(start_ordinal)
+    var start_month_cached = ymd_month_from_ordinal(start_ordinal)
     var ordinal = start_ordinal
     while ordinal <= until_ordinal:
         var year = ymd_year_from_ordinal(ordinal)
@@ -596,11 +598,9 @@ def mdu_rrule_generate(
         var day = ordinal - ordinal_from_ymd(year, month, 1) + 1
         var date_base: Bool
         if freq == 0:
-            date_base = (year - Int(ymd_year_from_ordinal(start_ordinal))) % interval == 0
+            date_base = (year - start_year_cached) % interval == 0
         elif freq == 1:
-            var start_year = ymd_year_from_ordinal(start_ordinal)
-            var start_month = ymd_month_from_ordinal(start_ordinal)
-            var month_diff = (year - start_year) * 12 + month - start_month
+            var month_diff = (year - start_year_cached) * 12 + month - start_month_cached
             date_base = month_diff >= 0 and month_diff % interval == 0
         elif freq == 2:
             var week_diff = (ordinal - start_week) // 7
