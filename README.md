@@ -179,11 +179,29 @@ launch costs about 20 us, and the materialization that dominates the call is
 untouched. `_generate()` is the native path, so splitting it would be strictly
 worse than the serial scan.
 
-There is no GPU path. These kernels are short, branch-heavy parsing and
-calendar operations with low arithmetic intensity, followed by unavoidable
-Python `datetime` materialization. Device transfer and launch overhead would
-dominate, so CPU remains the only execution device and no GPU dependency is
-added.
+**CPU only: memory-bound.** There is no GPU path, and that is the gated
+decision, not a missing feature.
+
+The GPU candidate gate is roughly 2 flops per byte of data moved. No kernel in
+this port reaches it. `mdu_parse_iso_many` is ~105 ns per record, of which
+`bench/analysis.md` section 4 puts ~10 ms native out of ~155 ms for 100k
+records; its inner loop is a byte-at-a-time ISO state machine that branches on
+each of the ~20-25 input bytes and writes a ~9-field int64 result, so the work
+per byte loaded is orders of magnitude under 2. The recurrence generator
+(section 5) is ~0.8 ms of calendar arithmetic for 250k occurrences, under one
+flop per byte written. The SIMD paths in the parser are pure buffer stores with
+no arithmetic. Every remaining cost in a public call is Python-side encoding and
+`datetime` materialization, which a device cannot touch.
+
+Host and device checked before deciding: `nvidia-smi --query-gpu=memory.free`
+reported 5290 MiB free on the shared GPU, above the 4000 MiB floor, so memory
+pressure is not the reason - arithmetic intensity is. No device allocation, no
+`max.gpu` dependency and no GPU test were added, so nothing is skipped by
+default. CPU remains the only execution device.
+
+The measured before/after for this phase is therefore unchanged: the tables
+above are the current numbers, and the parallelism discussion above is the
+final performance story.
 
 ## How it works
 
